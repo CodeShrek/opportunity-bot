@@ -6,6 +6,7 @@ from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from oauth2client.service_account import ServiceAccountCredentials
 from google import genai
+from google.genai import types  # <--- Imported types back
 import yt_dlp
 
 # ==========================================
@@ -18,7 +19,6 @@ IG_COOKIES = os.environ.get("IG_COOKIES")
 if not API_KEY or not GOOGLE_CREDS_JSON:
     raise ValueError("Missing Environment Variables. Please set them in the Render dashboard.")
 
-# SECURE COOKIE HANDLING: Create a temporary file safely on the server
 if IG_COOKIES:
     with open("cookies.txt", "w") as f:
         f.write(IG_COOKIES)
@@ -49,7 +49,6 @@ def download_complete_reel(url, output_filename="temp_video"):
         'no_warnings': True
     }
     
-    # Only use the cookie file if we successfully generated it securely
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = 'cookies.txt'
 
@@ -60,6 +59,12 @@ def download_complete_reel(url, output_filename="temp_video"):
 def analyze_video_with_gemini(video_path, original_url):
     video_file = client.files.upload(path=video_path)
     time.sleep(3)
+    
+    # FIX: Explicitly format the file so Gemini doesn't throw a 'data' error
+    video_part = types.Part.from_uri(
+        file_uri=video_file.uri,
+        mime_type="video/mp4"
+    )
     
     prompt = f"""
     You are an expert academic and professional career advisor. 
@@ -89,7 +94,7 @@ def analyze_video_with_gemini(video_path, original_url):
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[video_file, prompt],
+            contents=[video_part, prompt],
             config=config
         )
         return response.text
