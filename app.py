@@ -70,14 +70,15 @@ def download_media_from_url(url, output_filename="temp_media"):
         return None
 
 def analyze_with_gemini(file_path, incoming_text):
-    """Uploads file safely, checks string vs object return types, and analyzes with Gemini."""
+    """Uploads file safely, isolates IDs dynamically, and features adaptive 503 retry loops."""
     contents = []
     file_name = None
     
     if file_path and os.path.exists(file_path):
-        uploaded_file = client.files.upload(path=file_path)
+        # CORRECTED: Changed 'path=' keyword argument to official 'file=' parameter
+        uploaded_file = client.files.upload(file=file_path)
         
-        # TYPE-SAFETY FIX: Dynamically isolate file ID regardless of SDK variant
+        # Type-Safety Check: Isolate File ID structural maps regardless of SDK primitive variants
         if isinstance(uploaded_file, str):
             file_name = uploaded_file
         elif hasattr(uploaded_file, 'name'):
@@ -87,11 +88,10 @@ def analyze_with_gemini(file_path, incoming_text):
         else:
             file_name = str(uploaded_file)
         
-        # Defensive Polling Loop for processing state changes
+        # Defensive Polling Loop for ACTIVE processing states
         while True:
             file_meta = client.files.get(name=file_name)
             
-            # Extract state safely from object or dict structures
             if hasattr(file_meta, 'state'):
                 state_val = file_meta.state
                 state_name = state_val.name if hasattr(state_val, 'name') else str(state_val)
@@ -108,7 +108,6 @@ def analyze_with_gemini(file_path, incoming_text):
                 raise ValueError("Gemini file processing optimization failed.")
             time.sleep(2)
         
-        # Isolate URI structure
         file_uri = file_meta.uri if hasattr(file_meta, 'uri') else (file_meta.get('uri') if isinstance(file_meta, dict) else None)
         if not file_uri:
             clean_id = file_name.split('/')[-1]
@@ -119,7 +118,6 @@ def analyze_with_gemini(file_path, incoming_text):
         
         contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
 
-    # Master contextual agent prompt
     prompt = f"""
     You are an expert academic advisor and career placement officer. 
     Analyze the incoming message string or link: "{incoming_text}"
@@ -134,15 +132,32 @@ def analyze_with_gemini(file_path, incoming_text):
     """
     contents.append(prompt)
     
-    config = {"tools": [{"google_search": {}}], "temperature": 0.2}
+    # CORRECTED: Upgraded dictionary configuration to explicit strict SDK types for validation pass
+    config = types.GenerateContentConfig(
+        tools=[types.Tool(google_search=types.GoogleSearch())],
+        temperature=0.2
+    )
     
+    # ADVANCED RETRY PATTERN FOR HANDLING 503 SPIKES DURING CONCURRENT BATCH SENDS
+    max_retries = 4
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=contents,
-            config=config
-        )
-        return response.text
+        for attempt in range(max_retries):
+            try:
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=contents,
+                    config=config
+                )
+                return response.text
+            except Exception as e:
+                err_str = str(e).upper()
+                if "503" in err_str or "UNAVAILABLE" in err_str or "DEMAND" in err_str:
+                    if attempt < max_retries - 1:
+                        wait_time = 5 + (attempt * 5)
+                        print(f"Server load spike hit. Retry {attempt + 1}/{max_retries}. Sleeping {wait_time}s...")
+                        time.sleep(wait_time)
+                        continue
+                raise e
     finally:
         if file_name:
             try: client.files.delete(name=file_name)
@@ -163,7 +178,7 @@ def append_to_sheet(json_text):
             opp.get("qualifications", "N/A"), 
             opp.get("source_link", "N/A")
         ])
-        time.sleep(0.5) # Prevent Google Sheets rate-limiting
+        time.sleep(0.5) # Anti-rate limit throttling
     return len(opps)
 
 # ==========================================
@@ -198,7 +213,6 @@ def process_background(incoming_text, num_media, media_url, sender_id):
         twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"❌ Error during backend parsing: {str(e)}", to=sender_id)
     
     finally:
-        # Enforce dynamic cloud workspace cleaning
         for f in glob.glob("temp_*"):
             try: os.remove(f)
             except: pass
