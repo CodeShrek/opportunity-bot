@@ -32,10 +32,7 @@ sheet_client = gspread.authorize(creds)
 SHEET_NAME = "Fellowships"
 sheet = sheet_client.open(SHEET_NAME).sheet1 
 
-client = genai.Client(
-    api_key=API_KEY,
-    http_options=types.HttpOptions(timeout=240 * 1000) 
-)
+client = genai.Client(api_key=API_KEY)
 
 app = Flask(__name__)
 
