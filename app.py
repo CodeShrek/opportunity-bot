@@ -68,14 +68,22 @@ def download_media_from_url(url, output_filename="temp_media"):
         return None
 
 def analyze_with_gemini(file_path, incoming_text):
-    """Processes media or raw text using Gemini."""
     contents = []
     uploaded_file = None
     
-    # 1. Handle Media if available
+    # 1. Upload and wait for ACTIVE state
     if file_path and os.path.exists(file_path):
         uploaded_file = client.files.upload(path=file_path)
-        time.sleep(3)
+        
+        # Robust Wait: Check if file is ACTIVE
+        print(f"File uploaded: {uploaded_file.name}. Waiting for processing...")
+        while uploaded_file.state.name == "PROCESSING":
+            time.sleep(2)
+            uploaded_file = client.files.get(name=uploaded_file.name)
+        
+        if uploaded_file.state.name == "FAILED":
+            raise ValueError("Gemini file processing failed.")
+
         ext = file_path.split('.')[-1].lower()
         mime_type = "video/mp4" if ext in ['mp4', 'webm', 'mov'] else f"image/{ext if ext != 'jpg' else 'jpeg'}"
         media_part = types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=mime_type)
@@ -88,9 +96,7 @@ def analyze_with_gemini(file_path, incoming_text):
     
     1. Extract every program, fellowship, or scholarship mentioned.
     2. Google Search the program name to find the official application portal and the latest deadline.
-    3. If a link was provided, visit/analyze it to clarify requirements.
-    
-    Output strictly as a raw JSON list of objects:
+    3. Output strictly as a raw JSON list of objects:
     [
       {{"name": "Program", "deadline": "Date", "link": "URL", "qualifications": "Details", "source_link": "{incoming_text}"}}
     ]
