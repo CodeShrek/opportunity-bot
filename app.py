@@ -24,6 +24,7 @@ TWILIO_AUTH = os.environ.get("TWILIO_AUTH_TOKEN")
 if not all([API_KEY, GOOGLE_CREDS_JSON, TWILIO_SID, TWILIO_AUTH]):
     raise ValueError("Missing critical Environment Variables. Check Render Dashboard.")
 
+# Secure cookie file creation
 if IG_COOKIES:
     with open("cookies.txt", "w") as f:
         f.write(IG_COOKIES)
@@ -44,66 +45,54 @@ client = genai.Client(api_key=API_KEY)
 app = Flask(__name__)
 
 # ==========================================
-# 3. MULTIMODAL EXTRACTION PIPELINE
+# 3. CORE PROCESSING LOGIC
 # ==========================================
 def download_media_from_url(url, output_filename="temp_media"):
-    # Updated to grab whatever format exists (mp4, jpg, webp)
+    """Download media or extract metadata without crashing on photos/carousels."""
     ydl_opts = {
         'outtmpl': f'{output_filename}.%(ext)s',
         'quiet': True,
-        'no_warnings': True
+        'no_warnings': True,
+        'skip_download': False 
     }
     if os.path.exists("cookies.txt"):
         ydl_opts['cookiefile'] = 'cookies.txt'
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.extract_info(url, download=True)
-        
-    # Find whatever file was actually downloaded
-    files = glob.glob(f"{output_filename}.*")
-    if files:
-        return files[0]
-    return None
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.extract_info(url, download=True)
+        files = glob.glob(f"{output_filename}.*")
+        return files[0] if files else None
+    except Exception as e:
+        print(f"Media download failed, falling back to text analysis: {e}")
+        return None
 
 def analyze_with_gemini(file_path, incoming_text):
+    """Processes media or raw text using Gemini."""
     contents = []
     uploaded_file = None
     
-    # 1. If we successfully grabbed a Photo or Video, format it for Gemini
+    # 1. Handle Media if available
     if file_path and os.path.exists(file_path):
         uploaded_file = client.files.upload(path=file_path)
         time.sleep(3)
-        
         ext = file_path.split('.')[-1].lower()
-        if ext in ['mp4', 'webm', 'mov']:
-            mime_type = "video/mp4"
-        elif ext in ['jpg', 'jpeg', 'png', 'webp']:
-            mime_type = f"image/{ext if ext != 'jpg' else 'jpeg'}"
-        else:
-            mime_type = "application/octet-stream"
-            
+        mime_type = "video/mp4" if ext in ['mp4', 'webm', 'mov'] else f"image/{ext if ext != 'jpg' else 'jpeg'}"
         media_part = types.Part.from_uri(file_uri=uploaded_file.uri, mime_type=mime_type)
         contents.append(media_part)
 
-    # 2. The Smart Prompt (Works with media, or just raw links)
+    # 2. Structured Prompt
     prompt = f"""
     You are an expert academic advisor. 
-    I am giving you an incoming message/link: "{incoming_text}"
-    And potentially an attached image or video.
+    Incoming message/link context: "{incoming_text}"
     
-    1. Extract EVERY single program, fellowship, or scholarship mentioned in the media OR the text link.
-    2. If no media is attached, use your Google Search tool to browse the text link (e.g. LinkedIn) to find the context.
-    3. Use Google Search to find the official application portal link and latest application deadline.
+    1. Extract every program, fellowship, or scholarship mentioned.
+    2. Google Search the program name to find the official application portal and the latest deadline.
+    3. If a link was provided, visit/analyze it to clarify requirements.
     
-    Output response STRICTLY as a valid JSON list of objects.
+    Output strictly as a raw JSON list of objects:
     [
-      {{
-        "name": "Program Name",
-        "deadline": "Deadline found via Google Search",
-        "link": "Official link found via Google Search",
-        "qualifications": "Eligibility",
-        "source_link": "{incoming_text}"
-      }}
+      {{"name": "Program", "deadline": "Date", "link": "URL", "qualifications": "Details", "source_link": "{incoming_text}"}}
     ]
     """
     contents.append(prompt)
@@ -119,75 +108,45 @@ def analyze_with_gemini(file_path, incoming_text):
         return response.text
     finally:
         if uploaded_file:
-            try:
-                client.files.delete(name=uploaded_file.name)
-            except:
-                pass
+            try: client.files.delete(name=uploaded_file.name)
+            except: pass
 
-def append_multiple_to_sheet(json_response_text):
-    clean_text = json_response_text.strip().lstrip("```json").rstrip("```").strip()
-    opportunities = json.loads(clean_text)
-    if isinstance(opportunities, dict): opportunities = [opportunities]
-        
-    rows_added = 0
-    for opp in opportunities:
-        row_data = [opp.get("name", "N/A"), opp.get("deadline", "N/A"), opp.get("link", "N/A"), opp.get("qualifications", "N/A"), opp.get("source_link", "N/A")]
-        sheet.append_row(row_data)
-        rows_added += 1
-        time.sleep(0.5) 
-    return rows_added
+def append_to_sheet(json_text):
+    clean = json_text.strip().lstrip("```json").rstrip("```").strip()
+    opps = json.loads(clean)
+    if isinstance(opps, dict): opps = [opps]
+    for opp in opps:
+        sheet.append_row([opp.get("name", "N/A"), opp.get("deadline", "N/A"), opp.get("link", "N/A"), opp.get("qualifications", "N/A"), opp.get("source_link", "N/A")])
+        time.sleep(0.5)
+    return len(opps)
 
 # ==========================================
 # 4. BACKGROUND WORKER & WEBHOOK
 # ==========================================
 def process_background(incoming_text, num_media, media_url, sender_id):
-    twilio_client.messages.create(
-        from_=TWILIO_PHONE_NUMBER,
-        body="📥 Opportunity received! Deploying AI to analyze media/links...",
-        to=sender_id
-    )
+    twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body="📥 Opportunity received! Processing...", to=sender_id)
     
     media_path = None
     try:
-        # Scenario A: User forwarded a direct Photo/Screenshot on WhatsApp
+        # WhatsApp Image Logic
         if num_media > 0 and media_url:
             media_path = "temp_whatsapp_img.jpg"
-            img_data = requests.get(media_url).content
-            with open(media_path, "wb") as f:
-                f.write(img_data)
-                
-        # Scenario B: User sent a link (Instagram, YouTube, LinkedIn)
+            resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
+            with open(media_path, "wb") as f: f.write(resp.content)
+        # Instagram/Link Logic
         elif "http" in incoming_text:
-            clean_url = incoming_text.split('$')[0].split('%')[0].strip()
-            try:
-                media_path = download_media_from_url(clean_url)
-            except Exception as e:
-                # If it's a LinkedIn link that blocks downloads, we ignore media 
-                # and let Gemini just Google Search the text URL directly!
-                print(f"Media extraction skipped, falling back to text search: {e}")
-                media_path = None
+            media_path = download_media_from_url(incoming_text.split('$')[0].strip())
         
         raw_json = analyze_with_gemini(media_path, incoming_text)
-        count = append_multiple_to_sheet(raw_json)
+        count = append_to_sheet(raw_json)
         
-        twilio_client.messages.create(
-            from_=TWILIO_PHONE_NUMBER,
-            body=f"🎉 Success! Extracted and logged {count} verified opportunities directly into your 'Fellowships' sheet.",
-            to=sender_id
-        )
+        twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"🎉 Success! Logged {count} opportunities.", to=sender_id)
     except Exception as e:
-        twilio_client.messages.create(
-            from_=TWILIO_PHONE_NUMBER,
-            body=f"❌ Pipeline encountered an error: {str(e)}",
-            to=sender_id
-        )
+        twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"❌ Error: {str(e)}", to=sender_id)
     finally:
-        # Cleanup all temp files dynamically
         for f in glob.glob("temp_*"):
-            try:
-                os.remove(f)
-            except:
-                pass
+            try: os.remove(f)
+            except: pass
 
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_webhook():
@@ -196,23 +155,14 @@ def whatsapp_webhook():
     media_url = request.values.get('MediaUrl0') if num_media > 0 else None
     sender_id = request.values.get('From') 
     
-    # We now trigger if there is ANY link OR any attached photo
     if num_media > 0 or "http" in incoming_msg:
-        thread = Thread(target=process_background, args=(incoming_msg, num_media, media_url, sender_id))
-        thread.start()
+        Thread(target=process_background, args=(incoming_msg, num_media, media_url, sender_id)).start()
         return "OK", 200
-    else:
-        twilio_client.messages.create(
-            from_=TWILIO_PHONE_NUMBER,
-            body="👋 Forward an Instagram/LinkedIn link OR a Screenshot, and I will parse it into your tracker.",
-            to=sender_id
-        )
-        return "OK", 200
+    return "OK", 200
 
 @app.route("/", methods=['GET'])
 def health_check():
     return "Opportunity Bot is awake and running!"
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
