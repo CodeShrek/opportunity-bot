@@ -6,14 +6,11 @@ from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 from oauth2client.service_account import ServiceAccountCredentials
 from google import genai
-from google.genai import types
-from google.genai.errors import APIError
 import yt_dlp
 
 # ==========================================
 # 1. CLOUD ENVIRONMENT VARIABLES
 # ==========================================
-# The server will read these securely from Render's dashboard, not from files
 API_KEY = os.environ.get("GEMINI_API_KEY")
 GOOGLE_CREDS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 
@@ -24,7 +21,6 @@ if not API_KEY or not GOOGLE_CREDS_JSON:
 # 2. GOOGLE SHEETS & GEMINI INITIALIZATION
 # ==========================================
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-# Load credentials directly from the hidden JSON string
 creds_dict = json.loads(GOOGLE_CREDS_JSON)
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
 sheet_client = gspread.authorize(creds)
@@ -32,6 +28,7 @@ sheet_client = gspread.authorize(creds)
 SHEET_NAME = "Fellowships"
 sheet = sheet_client.open(SHEET_NAME).sheet1 
 
+# Cleaned up client structure
 client = genai.Client(api_key=API_KEY)
 
 app = Flask(__name__)
@@ -73,7 +70,12 @@ def analyze_video_with_gemini(video_path, original_url):
       }}
     ]
     """
-    config = types.GenerateContentConfig(tools=[{"google_search": {}}], temperature=0.2)
+    
+    # Simplified dictionary configuration to prevent SDK namespace issues
+    config = {
+        "tools": [{"google_search": {}}],
+        "temperature": 0.2
+    }
     
     try:
         response = client.models.generate_content(
@@ -139,7 +141,6 @@ def whatsapp_webhook():
         
     return str(resp)
 
-# Health check route for the cloud server
 @app.route("/", methods=['GET'])
 def health_check():
     return "Opportunity Bot is awake and running!"
@@ -148,6 +149,5 @@ def health_check():
 # 5. SERVER ACTIVATION
 # ==========================================
 if __name__ == "__main__":
-    # Render assigns ports dynamically, so we must read the PORT environment variable
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
