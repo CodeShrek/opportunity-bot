@@ -58,7 +58,7 @@ def download_complete_reel(url, output_filename="temp_video"):
         return f"{output_filename}.mp4"
 
 def analyze_video_with_gemini(video_path, original_url):
-    video_file = client.files.upload(file=video_path)
+    video_file = client.files.upload(path=video_path)
     time.sleep(3)
     
     prompt = f"""
