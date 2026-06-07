@@ -28,7 +28,7 @@ if IG_COOKIES:
 
 # Twilio Client Initialization for pushing messages
 twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
-TWILIO_PHONE_NUMBER = 'whatsapp:+14155238886' # The standard Twilio Sandbox number
+TWILIO_PHONE_NUMBER = 'whatsapp:+14155238886' 
 
 # ==========================================
 # 2. GOOGLE SHEETS & GEMINI INITIALIZATION
@@ -95,7 +95,7 @@ def analyze_video_with_gemini(video_path, original_url):
     finally:
         try:
             client.files.delete(name=video_file.name)
-        except:
+        except Exception:
             pass
 
 def append_multiple_to_sheet(json_response_text):
@@ -116,7 +116,6 @@ def append_multiple_to_sheet(json_response_text):
 # ==========================================
 def process_video_background(url, sender_id):
     """Runs in the background so Twilio doesn't timeout."""
-    # Send instant confirmation
     twilio_client.messages.create(
         from_=TWILIO_PHONE_NUMBER,
         body="📥 Link received! Waking up the server and deploying Gemini...",
@@ -129,7 +128,6 @@ def process_video_background(url, sender_id):
         raw_json = analyze_video_with_gemini(video_path, url)
         count = append_multiple_to_sheet(raw_json)
         
-        # Send final success confirmation
         twilio_client.messages.create(
             from_=TWILIO_PHONE_NUMBER,
             body=f"🎉 Success! Extracted and logged {count} verified opportunities directly into your 'Fellowships' sheet.",
@@ -148,16 +146,14 @@ def process_video_background(url, sender_id):
 @app.route("/whatsapp", methods=['POST'])
 def whatsapp_webhook():
     incoming_msg = request.values.get('Body', '').strip()
-    sender_id = request.values.get('From') # Tracks who sent the message
+    sender_id = request.values.get('From') 
     
     if "instagram.com" in incoming_msg or "youtube.com" in incoming_msg or "youtu.be" in incoming_msg:
         clean_url = incoming_msg.split('$')[0].split('%')[0].strip()
         
-        # Hand off the heavy lifting to a background thread
         thread = Thread(target=process_video_background, args=(clean_url, sender_id))
         thread.start()
         
-        # Return instantly to satisfy Twilio's 15-second rule
         return "OK", 200
     else:
         twilio_client.messages.create(
