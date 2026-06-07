@@ -70,16 +70,18 @@ def download_media_from_url(url, output_filename="temp_media"):
         return None
 
 def analyze_with_gemini(file_path, incoming_text):
-    """Uploads file (if exists), polls for ACTIVE state, and analyzes with Gemini."""
     contents = []
     file_name = None
     
-    # Process Media if it exists
     if file_path and os.path.exists(file_path):
+        # Step 1: Upload and get the file ID
         uploaded_file = client.files.upload(path=file_path)
-        file_name = uploaded_file.name
         
-        # Robust Polling: Wait for ACTIVE state
+        # Step 2: Extract the name/ID (SDK response handling)
+        # Agar uploaded_file object hai toh .name lenge, agar string hai toh wahi string lenge
+        file_name = uploaded_file.name if hasattr(uploaded_file, 'name') else uploaded_file
+        
+        # Step 3: Poll the file state using the ID
         while True:
             file_meta = client.files.get(name=file_name)
             if file_meta.state.name == "ACTIVE":
@@ -88,32 +90,28 @@ def analyze_with_gemini(file_path, incoming_text):
                 raise ValueError("Gemini file processing failed.")
             time.sleep(2)
         
-        # Determine mime type
         ext = file_path.split('.')[-1].lower()
         mime_type = "video/mp4" if ext in ['mp4', 'webm', 'mov'] else f"image/{ext if ext != 'jpg' else 'jpeg'}"
         contents.append(types.Part.from_uri(file_uri=file_meta.uri, mime_type=mime_type))
 
-    # Structured prompt
     prompt = f"""
-    You are an expert academic advisor. 
-    Context: "{incoming_text}"
-    Extract every program/fellowship/scholarship.
-    Find official application links and deadlines using Google Search.
-    Output strictly as a raw JSON list of objects:
+    Analyze context: "{incoming_text}"
+    Extract every fellowship/scholarship. Provide name, deadline, and official link.
+    Output strictly as JSON list:
     [
       {{"name": "Program", "deadline": "Date", "link": "URL", "qualifications": "Details", "source_link": "{incoming_text}"}}
     ]
     """
     contents.append(prompt)
     
-    # Configure Gemini with Google Search tool
-    config = {"tools": [{"google_search": {}}], "temperature": 0.2}
-    
     try:
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=contents, config=config)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=contents,
+            config={"tools": [{"google_search": {}}], "temperature": 0.2}
+        )
         return response.text
     finally:
-        # File Cleanup
         if file_name:
             try: client.files.delete(name=file_name)
             except: pass
