@@ -24,12 +24,12 @@ TWILIO_AUTH = os.environ.get("TWILIO_AUTH_TOKEN")
 if not all([API_KEY, GOOGLE_CREDS_JSON, TWILIO_SID, TWILIO_AUTH]):
     raise ValueError("Missing critical Environment Variables. Check Render Dashboard.")
 
-# Secure cookie file creation for yt-dlp
+# Secure cookie file creation for yt-dlp authentication
 if IG_COOKIES:
     with open("cookies.txt", "w") as f:
         f.write(IG_COOKIES)
 
-# Initialize Twilio Client
+# Initialize Twilio Client for background push messaging
 twilio_client = Client(TWILIO_SID, TWILIO_AUTH)
 TWILIO_PHONE_NUMBER = 'whatsapp:+14155238886' 
 
@@ -46,11 +46,11 @@ client = genai.Client(api_key=API_KEY)
 app = Flask(__name__)
 
 # ==========================================
-# 3. CORE PROCESSING PIPELINE
+# 3. CORE MULTIMODAL PROCESSING PIPELINE
 # ==========================================
 
 def download_media_from_url(url, output_filename="temp_media"):
-    """Download video/reels or extract metadata using cookies."""
+    """Securely downloads videos, reels, or photo metadata using cookies."""
     ydl_opts = {
         'outtmpl': f'{output_filename}.%(ext)s',
         'quiet': True,
@@ -66,49 +66,81 @@ def download_media_from_url(url, output_filename="temp_media"):
         files = glob.glob(f"{output_filename}.*")
         return files[0] if files else None
     except Exception as e:
-        print(f"Media download failed, falling back to text analysis: {e}")
+        print(f"Media download skipped or failed: {e}")
         return None
 
 def analyze_with_gemini(file_path, incoming_text):
+    """Uploads file safely, checks string vs object return types, and analyzes with Gemini."""
     contents = []
     file_name = None
     
     if file_path and os.path.exists(file_path):
-        # Step 1: Upload and get the file ID
         uploaded_file = client.files.upload(path=file_path)
         
-        # Step 2: Extract the name/ID (SDK response handling)
-        # Agar uploaded_file object hai toh .name lenge, agar string hai toh wahi string lenge
-        file_name = uploaded_file.name if hasattr(uploaded_file, 'name') else uploaded_file
+        # TYPE-SAFETY FIX: Dynamically isolate file ID regardless of SDK variant
+        if isinstance(uploaded_file, str):
+            file_name = uploaded_file
+        elif hasattr(uploaded_file, 'name'):
+            file_name = uploaded_file.name
+        elif isinstance(uploaded_file, dict) and 'name' in uploaded_file:
+            file_name = uploaded_file['name']
+        else:
+            file_name = str(uploaded_file)
         
-        # Step 3: Poll the file state using the ID
+        # Defensive Polling Loop for processing state changes
         while True:
             file_meta = client.files.get(name=file_name)
-            if file_meta.state.name == "ACTIVE":
+            
+            # Extract state safely from object or dict structures
+            if hasattr(file_meta, 'state'):
+                state_val = file_meta.state
+                state_name = state_val.name if hasattr(state_val, 'name') else str(state_val)
+            elif isinstance(file_meta, dict) and 'state' in file_meta:
+                state_val = file_meta['state']
+                state_name = state_val.get('name') if isinstance(state_val, dict) else str(state_val)
+            else:
+                state_name = "ACTIVE"
+            
+            state_name = state_name.upper()
+            if "ACTIVE" in state_name:
                 break
-            elif file_meta.state.name == "FAILED":
-                raise ValueError("Gemini file processing failed.")
+            elif "FAILED" in state_name:
+                raise ValueError("Gemini file processing optimization failed.")
             time.sleep(2)
         
+        # Isolate URI structure
+        file_uri = file_meta.uri if hasattr(file_meta, 'uri') else (file_meta.get('uri') if isinstance(file_meta, dict) else None)
+        if not file_uri:
+            clean_id = file_name.split('/')[-1]
+            file_uri = f"https://generativelanguage.googleapis.com/v1beta/files/{clean_id}"
+
         ext = file_path.split('.')[-1].lower()
         mime_type = "video/mp4" if ext in ['mp4', 'webm', 'mov'] else f"image/{ext if ext != 'jpg' else 'jpeg'}"
-        contents.append(types.Part.from_uri(file_uri=file_meta.uri, mime_type=mime_type))
+        
+        contents.append(types.Part.from_uri(file_uri=file_uri, mime_type=mime_type))
 
+    # Master contextual agent prompt
     prompt = f"""
-    Analyze context: "{incoming_text}"
-    Extract every fellowship/scholarship. Provide name, deadline, and official link.
-    Output strictly as JSON list:
+    You are an expert academic advisor and career placement officer. 
+    Analyze the incoming message string or link: "{incoming_text}"
+    Cross-reference any attached image visual information or video tracks.
+    
+    1. Extract every individual program, fellowship, or scholarship mentioned.
+    2. Execute a Google Search for the program name to locate the official portal webpage and deadline.
+    3. Output strictly as a raw JSON list of objects containing these keys:
     [
       {{"name": "Program", "deadline": "Date", "link": "URL", "qualifications": "Details", "source_link": "{incoming_text}"}}
     ]
     """
     contents.append(prompt)
     
+    config = {"tools": [{"google_search": {}}], "temperature": 0.2}
+    
     try:
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=contents,
-            config={"tools": [{"google_search": {}}], "temperature": 0.2}
+            config=config
         )
         return response.text
     finally:
@@ -117,10 +149,12 @@ def analyze_with_gemini(file_path, incoming_text):
             except: pass
 
 def append_to_sheet(json_text):
-    """Parses JSON response and appends to Google Sheet."""
+    """Cleans JSON wrap formatting and streams row-by-row onto Google Sheets."""
     clean = json_text.strip().lstrip("```json").rstrip("```").strip()
     opps = json.loads(clean)
-    if isinstance(opps, dict): opps = [opps]
+    if isinstance(opps, dict): 
+        opps = [opps]
+        
     for opp in opps:
         sheet.append_row([
             opp.get("name", "N/A"), 
@@ -129,41 +163,42 @@ def append_to_sheet(json_text):
             opp.get("qualifications", "N/A"), 
             opp.get("source_link", "N/A")
         ])
-        time.sleep(0.5)
+        time.sleep(0.5) # Prevent Google Sheets rate-limiting
     return len(opps)
 
 # ==========================================
-# 4. BACKGROUND WORKER & WEBHOOK
+# 4. ASYNCHRONOUS WORKER & TWILIO WEBHOOK
 # ==========================================
 
 def process_background(incoming_text, num_media, media_url, sender_id):
-    # Immediate confirmation to avoid Twilio Timeout
+    """Processes pipeline asynchronously to guarantee execution past Twilio timeouts."""
     twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body="📥 Opportunity received! Processing...", to=sender_id)
     
     media_path = None
     try:
-        # A) WhatsApp Image Logic (Auth-enabled)
+        # Condition A: Native image asset forwarded via WhatsApp message
         if num_media > 0 and media_url:
             media_path = "temp_whatsapp_img.jpg"
             resp = requests.get(media_url, auth=(TWILIO_SID, TWILIO_AUTH))
-            with open(media_path, "wb") as f: f.write(resp.content)
-            
-        # B) Instagram/Link Logic
+            with open(media_path, "wb") as f: 
+                f.write(resp.content)
+                
+        # Condition B: Raw web link extracted from plain text string
         elif "http" in incoming_text:
             url_to_fetch = incoming_text.split('$')[0].split('%')[0].strip()
             media_path = download_media_from_url(url_to_fetch)
         
-        # C) Run Analysis
+        # Process data payloads through Gemini and append out directly
         raw_json = analyze_with_gemini(media_path, incoming_text)
         count = append_to_sheet(raw_json)
         
         twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"🎉 Success! Logged {count} opportunities.", to=sender_id)
     
     except Exception as e:
-        twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"❌ Error: {str(e)}", to=sender_id)
+        twilio_client.messages.create(from_=TWILIO_PHONE_NUMBER, body=f"❌ Error during backend parsing: {str(e)}", to=sender_id)
     
     finally:
-        # Global Cleanup of temp files
+        # Enforce dynamic cloud workspace cleaning
         for f in glob.glob("temp_*"):
             try: os.remove(f)
             except: pass
@@ -175,7 +210,6 @@ def whatsapp_webhook():
     media_url = request.values.get('MediaUrl0') if num_media > 0 else None
     sender_id = request.values.get('From') 
     
-    # Webhook triggers for media OR links
     if num_media > 0 or "http" in incoming_msg:
         Thread(target=process_background, args=(incoming_msg, num_media, media_url, sender_id)).start()
         return "OK", 200
